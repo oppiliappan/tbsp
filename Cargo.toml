@@ -1,0 +1,16 @@
+[package]
+name = "trawk"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+
+[dependencies]
+tree-sitter = "0.20"
+regex = "1.3"
+thiserror = "1.0.61"
+serde = "1.0.204"
+nom = "7.1.3"
+tree-sitter-python = "0.20"
+
+[dev-dependencies]
