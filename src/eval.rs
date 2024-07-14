@@ -1,4 +1,4 @@
-//! tree walking interpreter for trawk
+//! tree walking interpreter for tbsp
 
 use crate::ast;
 use std::{collections::HashMap, fmt};
@@ -112,6 +112,8 @@ impl Value {
     fn mul(&self, other: &Self) -> Result {
         match (self, other) {
             (Self::Integer(s), Self::Integer(o)) => Ok(Self::Integer(*s * *o)),
+            (Self::Integer(s), Self::String(o)) => Ok(Self::String(o.repeat(*s as usize))),
+            (Self::String(_), Self::Integer(_)) => other.mul(self),
             _ => Err(Error::UndefinedBinOp(
                 ast::BinOp::Arith(ast::ArithOp::Mul),
                 self.ty(),
@@ -656,13 +658,13 @@ impl<'a> Context<'a> {
 
 pub fn evaluate(file: &str, program: &str, language: tree_sitter::Language) -> Result {
     let mut parser = tree_sitter::Parser::new();
-    let _ = parser.set_language(language);
+    let _ = parser.set_language(&language);
 
     let tree = parser.parse(file, None).unwrap();
     let cursor = tree.walk();
 
     let program = ast::Program::new().from_str(program).unwrap();
-    let mut ctx = Context::new(tree_sitter_md::language())
+    let mut ctx = Context::new(language)
         .with_input(file.to_owned())
         .with_cursor(cursor)
         .with_program(program)?;
