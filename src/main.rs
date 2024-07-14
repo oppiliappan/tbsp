@@ -1,7 +1,7 @@
 /// tree-based source processor
 #[derive(argh::FromArgs)]
 struct Cli {
-    /// read the TBSP program source from a file
+    /// read the tbsp program source from a file
     #[argh(option, short = 'f')]
     program_file: std::path::PathBuf,
 
