@@ -145,4 +145,4 @@ the examples directory contains a complete markdown-to-html
 converter, along with a few other motivating examples.
 
 [0]: https://github.com/tree-sitter-grammars/tree-sitter-markdown
-[1]: https://git.peppe.rs/languages/scope-tools/tree/tree-viz
+[1]: https://git.peppe.rs/cli/tree-viz
