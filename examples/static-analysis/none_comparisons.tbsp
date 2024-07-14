@@ -1,0 +1,24 @@
+BEGIN {
+    bool in_equal_compare = false;
+    string comparison_text = "";
+}
+
+enter comparison_operator {
+    if (text(node.operators) == "==") {
+        in_equal_compare = true;
+        comparison_text = text(node);
+    };
+}
+
+leave comparison_operator {
+    in_equal_compare = false;
+}
+
+enter none {
+    if (in_equal_compare) {
+        print("using `==` to compare with None, use `is None` instead:\n\t");
+        print(comparison_text);
+        print("\n");
+    } else {
+    };
+}

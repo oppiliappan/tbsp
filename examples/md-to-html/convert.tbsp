@@ -1,0 +1,65 @@
+BEGIN {
+    int depth = 0;
+
+    print("<html>\n");
+    print("<body>\n");
+}
+
+enter section {
+    depth += 1;
+}
+leave section {
+    depth -= 1;
+}
+
+enter atx_heading {
+    print("<h");
+    print(depth);
+    print(">");
+}
+leave atx_heading {
+    print("</h");
+    print(depth);
+    print(">\n");
+}
+
+enter paragraph {
+    print("<p>");
+}
+leave paragraph {
+    print("</p>\n");
+}
+
+enter list {
+    print("<ol>");
+}
+leave list {
+    print("</ol>\n");
+}
+
+enter list_item {
+    print("<li>");
+}
+leave list_item {
+    print("</li>\n");
+}
+
+enter fenced_code_block {
+    print("<pre>");
+}
+leave fenced_code_block {
+    print("</pre>\n");
+}
+
+enter inline {
+    print(text(node));
+}
+enter code_fence_content {
+    print(text(node));
+}
+
+END {
+    print("</body>\n");
+    print("</html>\n");
+}
+

@@ -1,0 +1,56 @@
+BEGIN {
+    int indent = 1;
+    string tab = "   ";
+    string tree = "└╴";
+    print("module\n");
+}
+
+enter declaration_list {
+    indent += 1;
+}
+leave declaration_list {
+    indent -= 1;
+}
+
+enter block {
+    indent += 1;
+}
+leave block {
+    indent -= 1;
+}
+
+enter function_item {
+    print(tab * indent);
+    print(tree);
+    print("fn " + text(node.name) + "\n");
+}
+
+enter function_signature_item {
+    print(tab * indent);
+    print(tree);
+    print("fn " + text(node.name) + "\n");
+}
+
+enter struct_item {
+    print(tab * indent);
+    print(tree);
+    print("struct " + text(node.name) + "\n");
+}
+
+enter enum_item {
+    print(tab * indent);
+    print(tree);
+    print("enum " + text(node.name) + "\n");
+}
+
+enter mod_item {
+    print(tab * indent);
+    print(tree);
+    print("mod " + text(node.name) + "\n");
+}
+
+enter impl_item {
+    print(tab * indent);
+    print(tree);
+    print("trait " + text(node.type) + "\n");
+}
