@@ -144,5 +144,61 @@ but an explanation is included nonetheless:
 the examples directory contains a complete markdown-to-html
 converter, along with a few other motivating examples.
 
+---
+
+usage:
+
+the tbsp evaluator is written in rust, use cargo to build
+and run:
+
+    cargo build --release
+    ./target/release/tbsp --help
+
+
+tbsp requires three inputs:
+
+- a tbsp program, referred to as "program file"
+- a language
+- an input file or some input text at stdin
+
+
+you can run the interpreter like so (this program prints an
+overview of a rust file):
+
+    $ ./target/release/tbsp \
+          -f./examples/code-overview/overview.tbsp \
+          -l rust \
+          src/main.rs
+    module
+       └╴struct Cli
+       └╴trait Cli
+          └╴fn program
+          └╴fn language
+          └╴fn file
+       └╴fn try_consume_stdin
+       └╴fn main
+
+    
+---
+
+roadmap:
+
+- interpreter performance
+  - [ ] introduce a hir with arena allocated blocks, expr
+  - [ ] bytecode VM?
+  - [ ] look into embedding high perf VMs, lua etc.
+- pattern matching
+  - [ ] allow matching on tree-sitter queries
+  - [ ] support captures
+- language features
+  - [ ] arrays and loops
+  - [ ] access node children
+  - [x] access node fields
+  - [ ] repr for ranges
+  - [ ] comments
+  - [ ] regexes
+
+
 [0]: https://github.com/tree-sitter-grammars/tree-sitter-markdown
 [1]: https://git.peppe.rs/cli/tree-viz
+
