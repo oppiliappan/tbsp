@@ -59,6 +59,7 @@ pub enum Statement {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum Expr {
     Node,
+    FieldAccess(Vec<Identifier>),
     Unit,
     Lit(Literal),
     Ident(Identifier),
@@ -71,22 +72,6 @@ pub enum Expr {
 }
 
 impl Expr {
-    pub fn int(int: i128) -> Expr {
-        Self::Lit(Literal::Int(int))
-    }
-
-    pub fn str(s: &str) -> Expr {
-        Self::Lit(Literal::Str(s.to_owned()))
-    }
-
-    pub const fn false_() -> Expr {
-        Self::Lit(Literal::Bool(false))
-    }
-
-    pub const fn true_() -> Expr {
-        Self::Lit(Literal::Bool(true))
-    }
-
     pub fn boxed(self) -> Box<Expr> {
         Box::new(self)
     }

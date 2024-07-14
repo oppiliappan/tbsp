@@ -39,6 +39,7 @@ pub enum Value {
     String(String),
     Boolean(bool),
     Node,
+    FieldAccess(Vec<String>),
 }
 
 impl Value {
@@ -49,6 +50,7 @@ impl Value {
             Self::String(_) => ast::Type::String,
             Self::Boolean(_) => ast::Type::Boolean,
             Self::Node => ast::Type::Node,
+            Self::FieldAccess(_) => ast::Type::Node,
         }
     }
 
@@ -241,6 +243,7 @@ impl fmt::Display for Value {
             Self::String(s) => write!(f, "{s}"),
             Self::Boolean(b) => write!(f, "{b}"),
             Self::Node => write!(f, "<node>"),
+            Self::FieldAccess(items) => write!(f, "<node>.{}", items.join(".")),
         }
     }
 }
@@ -317,7 +320,7 @@ pub enum Error {
     CurrentNodeNotPresent,
 }
 
-type Result = std::result::Result<Value, Error>;
+pub type Result = std::result::Result<Value, Error>;
 
 pub struct Context<'a> {
     variables: HashMap<ast::Identifier, Variable>,
@@ -385,6 +388,7 @@ impl<'a> Context<'a> {
             ast::Expr::IfExpr(if_expr) => self.eval_if(if_expr),
             ast::Expr::Block(block) => self.eval_block(block),
             ast::Expr::Node => Ok(Value::Node),
+            ast::Expr::FieldAccess(items) => Ok(Value::FieldAccess(items.to_owned())),
         }
     }
 
@@ -544,12 +548,33 @@ impl<'a> Context<'a> {
                 }
                 Ok(Value::Unit)
             }
-            ("text", [arg]) if self.eval_expr(arg)? == Value::Node => {
-                let node = self
-                    .cursor
-                    .as_ref()
-                    .ok_or(Error::CurrentNodeNotPresent)?
-                    .node();
+            ("text", [arg]) => {
+                let node = match self.eval_expr(arg)? {
+                    Value::Node => self
+                        .cursor
+                        .as_ref()
+                        .ok_or(Error::CurrentNodeNotPresent)?
+                        .node(),
+                    Value::FieldAccess(fields) => {
+                        let mut node = self
+                            .cursor
+                            .as_ref()
+                            .ok_or(Error::CurrentNodeNotPresent)?
+                            .node();
+                        for field in &fields {
+                            node = node
+                                .child_by_field_name(field.as_bytes())
+                                .ok_or_else(|| Error::FailedLookup(field.to_owned()))?;
+                        }
+                        node
+                    }
+                    v => {
+                        return Err(Error::TypeMismatch {
+                            expected: ast::Type::Node,
+                            got: v.ty(),
+                        })
+                    }
+                };
                 let text = node
                     .utf8_text(self.input_src.as_ref().unwrap().as_bytes())
                     .unwrap();
@@ -627,6 +652,22 @@ impl<'a> Context<'a> {
 
         Ok(Value::Unit)
     }
+}
+
+pub fn evaluate(file: &str, program: &str, language: tree_sitter::Language) -> Result {
+    let mut parser = tree_sitter::Parser::new();
+    let _ = parser.set_language(language);
+
+    let tree = parser.parse(file, None).unwrap();
+    let cursor = tree.walk();
+
+    let program = ast::Program::new().from_str(program).unwrap();
+    let mut ctx = Context::new(tree_sitter_md::language())
+        .with_input(file.to_owned())
+        .with_cursor(cursor)
+        .with_program(program)?;
+
+    ctx.eval()
 }
 
 #[cfg(test)]

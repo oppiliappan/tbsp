@@ -1,10 +1,10 @@
 use nom::{
     branch::alt,
-    bytes::complete::tag,
+    bytes::complete::{is_not, tag},
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, one_of},
     combinator::{map, opt, recognize, value},
     error::ParseError,
-    multi::{many0, many0_count, many1, separated_list0},
+    multi::{many0, many0_count, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, terminated, tuple},
     IResult, Parser,
 };
@@ -19,6 +19,11 @@ where
     E: ParseError<&'a str>,
 {
     delimited(multispace0, inner, multispace0)
+}
+
+// TODO use this
+fn _parse_comment<'a>(i: &'a str) -> IResult<&'a str, ()> {
+    value((), pair(tag("//"), is_not("\n\r")))(i)
 }
 
 fn parse_unit<'a>(i: &'a str) -> IResult<&'a str, ()> {
@@ -169,8 +174,16 @@ fn parse_mul<'a>(i: &'a str) -> IResult<&'a str, Expr> {
     alt((recursive, base)).parse(i)
 }
 
+fn parse_field_access<'a>(i: &'a str) -> IResult<&'a str, Vec<Identifier>> {
+    let node = tag("node");
+    let dot = ws(char('.'));
+    let fields = separated_list1(ws(char('.')), map(parse_name, str::to_owned));
+    map(tuple((node, dot, fields)), |(_, _, fields)| fields)(i)
+}
+
 fn parse_atom<'a>(i: &'a str) -> IResult<&'a str, Expr> {
     let inner = alt((
+        map(parse_field_access, Expr::FieldAccess),
         map(tag("node"), |_| Expr::Node),
         map(parse_block, Expr::Block),
         map(parse_if, Expr::IfExpr),
@@ -337,7 +350,7 @@ fn parse_pattern<'a>(i: &str) -> IResult<&str, Pattern> {
         tuple((parse_modifier, multispace0, parse_ident)),
         |(modifier, _, kind)| Pattern::Node(NodePattern { modifier, kind }),
     );
-    alt((begin, end, node)).parse(i)
+    ws(alt((begin, end, node))).parse(i)
 }
 
 pub fn parse_stanza<'a>(i: &str) -> IResult<&str, Stanza> {
@@ -357,6 +370,25 @@ pub fn parse_file(i: &str) -> IResult<&str, Vec<Stanza>> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    // test helpers
+    impl Expr {
+        pub fn int(int: i128) -> Expr {
+            Self::Lit(Literal::Int(int))
+        }
+
+        pub fn str(s: &str) -> Expr {
+            Self::Lit(Literal::Str(s.to_owned()))
+        }
+
+        pub const fn false_() -> Expr {
+            Self::Lit(Literal::Bool(false))
+        }
+
+        pub const fn true_() -> Expr {
+            Self::Lit(Literal::Bool(true))
+        }
+    }
 
     #[test]
     fn test_parse_unit() {
@@ -530,6 +562,26 @@ mod test {
                         Statement::Bare(Expr::int(1)),
                     ]
                 })
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_node() {
+        assert_eq!(parse_expr(r#" node "#), Ok(("", Expr::Node)));
+        assert_eq!(
+            parse_expr(r#" node.foo "#),
+            Ok(("", Expr::FieldAccess(vec!["foo".to_owned()])))
+        );
+        assert_eq!(
+            parse_expr(
+                r#" node
+                .foo
+                .bar"#
+            ),
+            Ok((
+                "",
+                Expr::FieldAccess(vec!["foo".to_owned(), "bar".to_owned()])
             ))
         );
     }
