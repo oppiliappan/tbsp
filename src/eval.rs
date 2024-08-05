@@ -76,10 +76,33 @@ impl Value {
         Self::String(String::default())
     }
 
-    fn as_boolean(&self) -> Option<bool> {
+    fn as_boolean(&self) -> std::result::Result<bool, Error> {
         match self {
-            Self::Boolean(b) => Some(*b),
-            _ => None,
+            Self::Boolean(b) => Ok(*b),
+            v => Err(Error::TypeMismatch {
+                expected: ast::Type::Boolean,
+                got: v.ty(),
+            }),
+        }
+    }
+
+    fn as_str(&self) -> std::result::Result<&str, Error> {
+        match self {
+            Self::String(s) => Ok(s.as_str()),
+            v => Err(Error::TypeMismatch {
+                expected: ast::Type::String,
+                got: v.ty(),
+            }),
+        }
+    }
+
+    fn as_int(&self) -> std::result::Result<i128, Error> {
+        match self {
+            Self::Integer(i) => Ok(*i),
+            v => Err(Error::TypeMismatch {
+                expected: ast::Type::Integer,
+                got: v.ty(),
+            }),
         }
     }
 
@@ -250,6 +273,24 @@ impl fmt::Display for Value {
     }
 }
 
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+impl From<i128> for Value {
+    fn from(value: i128) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
 type NodeKind = u16;
 
 #[derive(Debug, Default)]
@@ -312,12 +353,20 @@ impl Visitors {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     FailedLookup(ast::Identifier),
-    TypeMismatch { expected: ast::Type, got: ast::Type },
+    TypeMismatch {
+        expected: ast::Type,
+        got: ast::Type,
+    },
     UndefinedBinOp(ast::BinOp, ast::Type, ast::Type),
     UndefinedUnaryOp(ast::UnaryOp, ast::Type),
     AlreadyBound(ast::Identifier),
     MalformedExpr(String),
     InvalidNodeKind(String),
+    InvalidStringSlice {
+        length: usize,
+        start: i128,
+        end: i128,
+    },
     // current node is only set in visitors, not in BEGIN or END blocks
     CurrentNodeNotPresent,
 }
@@ -496,10 +545,7 @@ impl<'a> Context<'a> {
         let l = self.eval_expr(lhs)?;
 
         // short-circuit
-        let l_value = l.as_boolean().ok_or_else(|| Error::TypeMismatch {
-            expected: ast::Type::Boolean,
-            got: l.ty(),
-        })?;
+        let l_value = l.as_boolean()?;
 
         match op {
             ast::LogicOp::Or => {
@@ -531,10 +577,7 @@ impl<'a> Context<'a> {
     fn eval_if(&mut self, if_expr: &ast::If) -> Result {
         let cond = self.eval_expr(&if_expr.condition)?;
 
-        if cond.as_boolean().ok_or_else(|| Error::TypeMismatch {
-            expected: ast::Type::Boolean,
-            got: cond.ty(),
-        })? {
+        if cond.as_boolean()? {
             self.eval_block(&if_expr.then)
         } else {
             self.eval_block(&if_expr.else_)
@@ -549,6 +592,50 @@ impl<'a> Context<'a> {
                     print!("{val}");
                 }
                 Ok(Value::Unit)
+            }
+            (predicate @ ("isupper" | "islower"), [arg]) => Ok(self
+                .eval_expr(arg)?
+                .as_str()?
+                .chars()
+                .all(|c| match predicate {
+                    "isupper" => c.is_ascii_uppercase(),
+                    "islower" => c.is_ascii_lowercase(),
+                    _ => unreachable!(),
+                })
+                .into()),
+            ("substr", [string, indices @ ..]) => {
+                let v = self.eval_expr(string)?;
+                let s = v.as_str()?;
+                match indices {
+                    [start, end] => {
+                        let start = self.eval_expr(start)?.as_int()?;
+                        let end = self.eval_expr(end)?.as_int()?;
+                        if start < 0
+                            || start >= s.len() as i128
+                            || end >= s.len() as i128
+                            || start > end
+                        {
+                            return Err(Error::InvalidStringSlice {
+                                length: s.len(),
+                                start,
+                                end,
+                            });
+                        }
+                        Ok(s[start as usize..end as usize].into())
+                    }
+                    [end] => {
+                        let end = self.eval_expr(end)?.as_int()?;
+                        if end >= s.len() as i128 {
+                            return Err(Error::InvalidStringSlice {
+                                length: s.len(),
+                                start: 0,
+                                end,
+                            });
+                        }
+                        Ok(s[..end as usize].into())
+                    }
+                    _ => todo!(),
+                }
             }
             ("text", [arg]) => {
                 let node = match self.eval_expr(arg)? {
@@ -801,6 +888,49 @@ mod test {
                 ty: ast::Type::Integer,
                 name: "a".to_owned(),
                 value: Value::Integer(6)
+            }
+        );
+    }
+
+    #[test]
+    fn test_substring() {
+        let language = tree_sitter_python::language();
+        let mut ctx = Context::new(language)
+            .with_program(ast::Program::new())
+            .unwrap();
+        assert_eq!(
+            ctx.eval_block(&ast::Block {
+                body: vec![
+                    ast::Statement::Declaration(ast::Declaration {
+                        ty: ast::Type::String,
+                        name: "a".to_owned(),
+                        init: Some(ast::Expr::str("foobar").boxed()),
+                    }),
+                    ast::Statement::Declaration(ast::Declaration {
+                        ty: ast::Type::String,
+                        name: "b".to_owned(),
+                        init: Some(
+                            ast::Expr::Call(ast::Call {
+                                function: "substr".into(),
+                                parameters: vec![
+                                    ast::Expr::Ident("a".to_owned()),
+                                    ast::Expr::int(0),
+                                    ast::Expr::int(3),
+                                ]
+                            })
+                            .boxed()
+                        ),
+                    }),
+                ]
+            }),
+            Ok(Value::Unit)
+        );
+        assert_eq!(
+            ctx.lookup(&String::from("b")).unwrap().clone(),
+            Variable {
+                ty: ast::Type::String,
+                name: "b".to_owned(),
+                value: "foo".into()
             }
         );
     }
