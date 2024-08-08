@@ -4,7 +4,7 @@ use nom::{
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, one_of},
     combinator::{map, opt, recognize, value},
     error::ParseError,
-    multi::{many0, many0_count, many1, separated_list0, separated_list1},
+    multi::{fold_many0, many0, many0_count, many1, separated_list0},
     sequence::{delimited, pair, preceded, terminated, tuple},
     IResult, Parser,
 };
@@ -169,24 +169,27 @@ fn parse_mul<'a>(i: &'a str) -> IResult<&'a str, Expr> {
     let div = parse_op("/", BinOp::Arith(ArithOp::Div));
     let mod_ = parse_op("%", BinOp::Arith(ArithOp::Mod));
     let op = alt((mul, div, mod_));
-    let recursive = parse_binary(parse_atom, op, parse_mul);
-    let base = parse_atom;
+    let recursive = parse_binary(parse_field_access, op, parse_mul);
+    let base = parse_field_access;
     alt((recursive, base)).parse(i)
 }
 
-fn parse_field_access<'a>(i: &'a str) -> IResult<&'a str, Vec<Identifier>> {
-    let node = tag("node");
-    let dot = ws(char('.'));
-    let fields = separated_list1(ws(char('.')), map(parse_name, str::to_owned));
-    map(tuple((node, dot, fields)), |(_, _, fields)| fields)(i)
+fn parse_field_access<'a>(i: &'a str) -> IResult<&'a str, Expr> {
+    let trailing = map(tuple((ws(char('.')), ws(parse_ident))), |(_, i)| i);
+    let (i, base) = parse_atom(i)?;
+
+    fold_many0(
+        trailing,
+        move || base.clone(),
+        move |acc, new| Expr::FieldAccess(acc.boxed(), new),
+    )(i)
 }
 
 fn parse_atom<'a>(i: &'a str) -> IResult<&'a str, Expr> {
     let inner = alt((
-        map(parse_field_access, Expr::FieldAccess),
         map(tag("node"), |_| Expr::Node),
         map(parse_block, Expr::Block),
-        map(parse_if, Expr::IfExpr),
+        map(parse_if, Expr::If),
         map(parse_call, Expr::Call),
         map(parse_lit, Expr::Lit),
         map(parse_ident, Expr::Ident),
@@ -217,7 +220,7 @@ fn parse_block<'a>(i: &'a str) -> IResult<&'a str, Block> {
     delimited(open, statements, close).parse(i)
 }
 
-fn parse_if<'a>(i: &'a str) -> IResult<&'a str, If> {
+fn parse_if<'a>(i: &'a str) -> IResult<&'a str, IfExpr> {
     let if_ = delimited(multispace0, tag("if"), multispace1);
 
     let open = char('(');
@@ -231,7 +234,7 @@ fn parse_if<'a>(i: &'a str) -> IResult<&'a str, If> {
 
     map(
         tuple((if_, open, condition, close, then, else_)),
-        |(_, _, condition, _, then, else_)| If {
+        |(_, _, condition, _, then, else_)| IfExpr {
             condition: condition.boxed(),
             then,
             else_: else_.unwrap_or_default(),
@@ -571,7 +574,7 @@ mod test {
         assert_eq!(parse_expr(r#" node "#), Ok(("", Expr::Node)));
         assert_eq!(
             parse_expr(r#" node.foo "#),
-            Ok(("", Expr::FieldAccess(vec!["foo".to_owned()])))
+            Ok(("", Expr::FieldAccess(Expr::Node.boxed(), "foo".to_owned())))
         );
         assert_eq!(
             parse_expr(
@@ -581,7 +584,10 @@ mod test {
             ),
             Ok((
                 "",
-                Expr::FieldAccess(vec!["foo".to_owned(), "bar".to_owned()])
+                Expr::FieldAccess(
+                    Expr::FieldAccess(Expr::Node.boxed(), "foo".to_owned()).boxed(),
+                    "bar".to_owned()
+                )
             ))
         );
     }
@@ -600,7 +606,7 @@ mod test {
             ),
             Ok((
                 "",
-                Expr::IfExpr(If {
+                Expr::If(IfExpr {
                     condition: Expr::Bin(
                         Expr::int(1).boxed(),
                         BinOp::Cmp(CmpOp::Eq),
@@ -713,7 +719,7 @@ mod test {
             parse_statement("if (true) { true; };"),
             Ok((
                 "",
-                Statement::Bare(Expr::IfExpr(If {
+                Statement::Bare(Expr::If(IfExpr {
                     condition: Expr::true_().boxed(),
                     then: Block {
                         body: vec![Statement::Bare(Expr::true_())]
@@ -726,7 +732,7 @@ mod test {
             parse_expr("if (true) { true; } else { true; }"),
             Ok((
                 "",
-                Expr::IfExpr(If {
+                Expr::If(IfExpr {
                     condition: Expr::true_().boxed(),
                     then: Block {
                         body: vec![Statement::Bare(Expr::true_())]

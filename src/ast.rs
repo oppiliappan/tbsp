@@ -59,7 +59,7 @@ pub enum Statement {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum Expr {
     Node,
-    FieldAccess(Vec<Identifier>),
+    FieldAccess(Box<Expr>, Identifier),
     Unit,
     Lit(Literal),
     Ident(Identifier),
@@ -67,13 +67,20 @@ pub enum Expr {
     Bin(Box<Expr>, BinOp, Box<Expr>),
     Unary(Box<Expr>, UnaryOp),
     Call(Call),
-    IfExpr(If),
+    If(IfExpr),
     Block(Block),
 }
 
 impl Expr {
     pub fn boxed(self) -> Box<Expr> {
         Box::new(self)
+    }
+
+    pub fn as_ident(self) -> Option<Identifier> {
+        match self {
+            Self::Ident(i) => Some(i),
+            _ => None,
+        }
     }
 }
 
@@ -164,7 +171,7 @@ pub struct Declaration {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub struct If {
+pub struct IfExpr {
     pub condition: Box<Expr>,
     pub then: Block,
     pub else_: Block,

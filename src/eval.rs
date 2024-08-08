@@ -1,6 +1,6 @@
 //! tree walking interpreter for tbsp
 
-use crate::ast;
+use crate::{ast, Wrap};
 use std::{collections::HashMap, fmt};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -38,9 +38,10 @@ pub enum Value {
     Integer(i128),
     String(String),
     Boolean(bool),
-    Node,
-    FieldAccess(Vec<String>),
+    Node(NodeId),
 }
+
+type NodeId = usize;
 
 impl Value {
     fn ty(&self) -> ast::Type {
@@ -49,8 +50,7 @@ impl Value {
             Self::Integer(_) => ast::Type::Integer,
             Self::String(_) => ast::Type::String,
             Self::Boolean(_) => ast::Type::Boolean,
-            Self::Node => ast::Type::Node,
-            Self::FieldAccess(_) => ast::Type::Node,
+            Self::Node(_) => ast::Type::Node,
         }
     }
 
@@ -101,6 +101,16 @@ impl Value {
             Self::Integer(i) => Ok(*i),
             v => Err(Error::TypeMismatch {
                 expected: ast::Type::Integer,
+                got: v.ty(),
+            }),
+        }
+    }
+
+    fn as_node(&self) -> std::result::Result<NodeId, Error> {
+        match self {
+            Self::Node(id) => Ok(*id),
+            v => Err(Error::TypeMismatch {
+                expected: ast::Type::Node,
                 got: v.ty(),
             }),
         }
@@ -267,8 +277,7 @@ impl fmt::Display for Value {
             Self::Integer(i) => write!(f, "{i}"),
             Self::String(s) => write!(f, "{s}"),
             Self::Boolean(b) => write!(f, "{b}"),
-            Self::Node => write!(f, "<node>"),
-            Self::FieldAccess(items) => write!(f, "<node>.{}", items.join(".")),
+            Self::Node(id) => write!(f, "<node #{id}>"),
         }
     }
 }
@@ -373,15 +382,17 @@ pub enum Error {
 
 pub type Result = std::result::Result<Value, Error>;
 
-pub struct Context<'a> {
+pub struct Context {
     variables: HashMap<ast::Identifier, Variable>,
     language: tree_sitter::Language,
     visitors: Visitors,
     input_src: Option<String>,
-    cursor: Option<tree_sitter::TreeCursor<'a>>,
+    cursor: Option<tree_sitter::TreeCursor<'static>>,
+    tree: Option<&'static tree_sitter::Tree>,
+    cache: HashMap<NodeId, tree_sitter::Node<'static>>,
 }
 
-impl<'a> fmt::Debug for Context<'a> {
+impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Context")
             .field("variables", &self.variables)
@@ -400,7 +411,7 @@ impl<'a> fmt::Debug for Context<'a> {
     }
 }
 
-impl<'a> Context<'a> {
+impl Context {
     pub fn new(language: tree_sitter::Language) -> Self {
         Self {
             visitors: Default::default(),
@@ -408,7 +419,42 @@ impl<'a> Context<'a> {
             language,
             input_src: None,
             cursor: None,
+            tree: None,
+            cache: HashMap::default(),
         }
+    }
+
+    pub fn cache_node(&mut self, node: tree_sitter::Node<'static>) {
+        self.cache.entry(node.id()).or_insert(node);
+    }
+
+    pub fn get_node_by_id(&mut self, id: usize) -> Option<tree_sitter::Node<'static>> {
+        let root_node = self.tree.as_ref().map(|t| t.root_node())?;
+        self.get_node_by_id_helper(root_node, id)
+    }
+
+    fn get_node_by_id_helper(
+        &mut self,
+        start: tree_sitter::Node<'static>,
+        id: usize,
+    ) -> Option<tree_sitter::Node<'static>> {
+        self.cache_node(start);
+
+        if let Some(found) = self.cache.get(&id) {
+            return Some(*found);
+        }
+
+        if start.id() == id {
+            return Some(start);
+        } else {
+            for child in start.children(&mut start.walk()) {
+                if let Some(n) = self.get_node_by_id_helper(child, id) {
+                    return Some(n);
+                };
+            }
+        }
+
+        None
     }
 
     pub fn with_program(mut self, program: ast::Program) -> std::result::Result<Self, Error> {
@@ -423,8 +469,10 @@ impl<'a> Context<'a> {
         self
     }
 
-    pub fn with_cursor(mut self, cursor: tree_sitter::TreeCursor<'a>) -> Self {
-        self.cursor = Some(cursor);
+    pub fn with_tree(mut self, tree: tree_sitter::Tree) -> Self {
+        let tree = Box::leak(Box::new(tree));
+        self.cursor = Some(tree.walk());
+        self.tree = Some(tree);
         self
     }
 
@@ -436,10 +484,10 @@ impl<'a> Context<'a> {
             ast::Expr::Bin(lhs, op, rhs) => self.eval_bin(&*lhs, *op, &*rhs),
             ast::Expr::Unary(expr, op) => self.eval_unary(&*expr, *op),
             ast::Expr::Call(call) => self.eval_call(&*call),
-            ast::Expr::IfExpr(if_expr) => self.eval_if(if_expr),
+            ast::Expr::If(if_expr) => self.eval_if(if_expr),
             ast::Expr::Block(block) => self.eval_block(block),
-            ast::Expr::Node => Ok(Value::Node),
-            ast::Expr::FieldAccess(items) => Ok(Value::FieldAccess(items.to_owned())),
+            ast::Expr::Node => self.eval_node(),
+            ast::Expr::FieldAccess(expr, items) => self.eval_field_access(expr, items),
         }
     }
 
@@ -449,6 +497,16 @@ impl<'a> Context<'a> {
             ast::Literal::Int(i) => Ok(Value::Integer(*i)),
             ast::Literal::Bool(b) => Ok(Value::Boolean(*b)),
         }
+    }
+
+    fn eval_node(&mut self) -> Result {
+        self.cursor
+            .as_ref()
+            .ok_or(Error::CurrentNodeNotPresent)?
+            .node()
+            .id()
+            .wrap(Value::Node)
+            .wrap_ok()
     }
 
     fn lookup(&mut self, ident: &ast::Identifier) -> std::result::Result<&Variable, Error> {
@@ -469,14 +527,14 @@ impl<'a> Context<'a> {
         ty: ast::Type,
     ) -> std::result::Result<&mut Variable, Error> {
         if self.lookup(ident).is_err() {
-            Ok(self
-                .variables
+            self.variables
                 .entry(ident.to_owned())
                 .or_insert_with(|| Variable {
                     name: ident.to_owned(),
                     value: Value::default(ty),
                     ty,
-                }))
+                })
+                .wrap_ok()
         } else {
             Err(Error::AlreadyBound(ident.to_owned()))
         }
@@ -574,7 +632,7 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn eval_if(&mut self, if_expr: &ast::If) -> Result {
+    fn eval_if(&mut self, if_expr: &ast::IfExpr) -> Result {
         let cond = self.eval_expr(&if_expr.condition)?;
 
         if cond.as_boolean()? {
@@ -638,32 +696,9 @@ impl<'a> Context<'a> {
                 }
             }
             ("text", [arg]) => {
-                let node = match self.eval_expr(arg)? {
-                    Value::Node => self
-                        .cursor
-                        .as_ref()
-                        .ok_or(Error::CurrentNodeNotPresent)?
-                        .node(),
-                    Value::FieldAccess(fields) => {
-                        let mut node = self
-                            .cursor
-                            .as_ref()
-                            .ok_or(Error::CurrentNodeNotPresent)?
-                            .node();
-                        for field in &fields {
-                            node = node
-                                .child_by_field_name(field.as_bytes())
-                                .ok_or_else(|| Error::FailedLookup(field.to_owned()))?;
-                        }
-                        node
-                    }
-                    v => {
-                        return Err(Error::TypeMismatch {
-                            expected: ast::Type::Node,
-                            got: v.ty(),
-                        })
-                    }
-                };
+                let v = self.eval_expr(arg)?;
+                let id = v.as_node()?;
+                let node = self.get_node_by_id(id).unwrap();
                 let text = node
                     .utf8_text(self.input_src.as_ref().unwrap().as_bytes())
                     .unwrap();
@@ -689,7 +724,7 @@ impl<'a> Context<'a> {
 
     fn eval_statement(&mut self, stmt: &ast::Statement) -> Result {
         match stmt {
-            ast::Statement::Bare(expr) => self.eval_expr(expr).map(|_| Value::Unit),
+            ast::Statement::Bare(expr) => self.eval_expr(expr),
             ast::Statement::Declaration(decl) => self.eval_declaration(decl),
         }
     }
@@ -701,6 +736,24 @@ impl<'a> Context<'a> {
         Ok(Value::Unit)
     }
 
+    fn eval_field_access(&mut self, expr: &ast::Expr, field: &ast::Identifier) -> Result {
+        let v = self.eval_expr(expr)?;
+        let base = v.as_node()?;
+        let base_node = self.get_node_by_id(base).unwrap();
+        base_node
+            .child_by_field_name(field)
+            .ok_or(Error::InvalidNodeKind(field.clone()))
+            .map(|n| n.id())
+            .map(Value::Node)
+    }
+
+    fn goto_first_child(&mut self) -> bool {
+        self.cursor
+            .as_mut()
+            .map(|c| c.goto_first_child())
+            .unwrap_or_default()
+    }
+
     pub fn eval(&mut self) -> Result {
         let visitors = std::mem::take(&mut self.visitors);
         let mut has_next = true;
@@ -710,29 +763,29 @@ impl<'a> Context<'a> {
         self.eval_block(&visitors.begin)?;
 
         while has_next {
-            let current_node = self.cursor.as_mut().unwrap().node();
+            let current_node = self.cursor.as_ref().unwrap().node();
             postorder.push(current_node);
 
             let visitor = visitors.get_by_node(current_node);
 
-            visitor.map(|v| self.eval_block(&v.enter));
+            if let Some(v) = visitor {
+                self.eval_block(&v.enter)?;
+            }
 
-            has_next = self.cursor.as_mut().unwrap().goto_first_child();
+            has_next = self.goto_first_child();
 
             if !has_next {
                 has_next = self.cursor.as_mut().unwrap().goto_next_sibling();
-                postorder
-                    .pop()
-                    .and_then(|n| visitors.get_by_node(n))
-                    .map(|v| self.eval_block(&v.leave));
+                if let Some(v) = postorder.pop().and_then(|n| visitors.get_by_node(n)) {
+                    self.eval_block(&v.leave)?;
+                }
             }
 
             while !has_next && self.cursor.as_mut().unwrap().goto_parent() {
                 has_next = self.cursor.as_mut().unwrap().goto_next_sibling();
-                postorder
-                    .pop()
-                    .and_then(|n| visitors.get_by_node(n))
-                    .map(|v| self.eval_block(&v.leave));
+                if let Some(v) = postorder.pop().and_then(|n| visitors.get_by_node(n)) {
+                    self.eval_block(&v.leave)?;
+                }
             }
         }
 
@@ -748,12 +801,11 @@ pub fn evaluate(file: &str, program: &str, language: tree_sitter::Language) -> R
     let _ = parser.set_language(&language);
 
     let tree = parser.parse(file, None).unwrap();
-    let cursor = tree.walk();
 
     let program = ast::Program::new().from_str(program).unwrap();
     let mut ctx = Context::new(language)
         .with_input(file.to_owned())
-        .with_cursor(cursor)
+        .with_tree(tree)
         .with_program(program)?;
 
     ctx.eval()
@@ -857,7 +909,7 @@ mod test {
                         name: "a".to_owned(),
                         init: Some(ast::Expr::int(1).boxed()),
                     }),
-                    ast::Statement::Bare(ast::Expr::IfExpr(ast::If {
+                    ast::Statement::Bare(ast::Expr::If(ast::IfExpr {
                         condition: ast::Expr::true_().boxed(),
                         then: ast::Block {
                             body: vec![ast::Statement::Bare(ast::Expr::Bin(
