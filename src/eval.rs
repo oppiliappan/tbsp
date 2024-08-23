@@ -15,17 +15,17 @@ impl Variable {
         &self.value
     }
 
-    fn ty(&self) -> ast::Type {
-        self.ty
+    fn ty(&self) -> &ast::Type {
+        &self.ty
     }
 
     fn assign(&mut self, value: Value) -> Result {
-        if self.ty() == value.ty() {
+        if self.ty() == &value.ty() {
             self.value = value;
             Ok(self.value.clone())
         } else {
             Err(Error::TypeMismatch {
-                expected: self.ty(),
+                expected: self.ty().clone(),
                 got: value.ty(),
             })
         }
@@ -39,6 +39,7 @@ pub enum Value {
     String(String),
     Boolean(bool),
     Node(NodeId),
+    List(Vec<Value>),
 }
 
 type NodeId = usize;
@@ -51,6 +52,7 @@ impl Value {
             Self::String(_) => ast::Type::String,
             Self::Boolean(_) => ast::Type::Boolean,
             Self::Node(_) => ast::Type::Node,
+            Self::List(_) => ast::Type::List,
         }
     }
 
@@ -61,6 +63,7 @@ impl Value {
             ast::Type::String => Self::default_string(),
             ast::Type::Boolean => Self::default_bool(),
             ast::Type::Node => unreachable!(),
+            ast::Type::List => Self::default_list(),
         }
     }
 
@@ -74,6 +77,10 @@ impl Value {
 
     fn default_string() -> Self {
         Self::String(String::default())
+    }
+
+    fn default_list() -> Self {
+        Self::List(Vec::new())
     }
 
     fn as_boolean(&self) -> std::result::Result<bool, Error> {
@@ -111,6 +118,16 @@ impl Value {
             Self::Node(id) => Ok(*id),
             v => Err(Error::TypeMismatch {
                 expected: ast::Type::Node,
+                got: v.ty(),
+            }),
+        }
+    }
+
+    fn as_list(&self) -> std::result::Result<Vec<Value>, Error> {
+        match self {
+            Self::List(values) => Ok(values.clone()),
+            v => Err(Error::TypeMismatch {
+                expected: ast::Type::List,
                 got: v.ty(),
             }),
         }
@@ -278,6 +295,13 @@ impl fmt::Display for Value {
             Self::String(s) => write!(f, "{s}"),
             Self::Boolean(b) => write!(f, "{b}"),
             Self::Node(id) => write!(f, "<node #{id}>"),
+            Self::List(items) => {
+                write!(f, "[")?;
+                for i in items {
+                    write!(f, "{i}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -297,6 +321,12 @@ impl From<i128> for Value {
 impl From<&str> for Value {
     fn from(value: &str) -> Self {
         Self::String(value.to_owned())
+    }
+}
+
+impl From<Vec<Value>> for Value {
+    fn from(value: Vec<Value>) -> Self {
+        Self::List(value)
     }
 }
 
@@ -371,10 +401,15 @@ pub enum Error {
     AlreadyBound(ast::Identifier),
     MalformedExpr(String),
     InvalidNodeKind(String),
+    NoParentNode(tree_sitter::Node<'static>),
     InvalidStringSlice {
         length: usize,
         start: i128,
         end: i128,
+    },
+    ArrayOutOfBounds {
+        idx: i128,
+        len: usize
     },
     // current node is only set in visitors, not in BEGIN or END blocks
     CurrentNodeNotPresent,
@@ -484,6 +519,8 @@ impl Context {
             ast::Expr::Bin(lhs, op, rhs) => self.eval_bin(&*lhs, *op, &*rhs),
             ast::Expr::Unary(expr, op) => self.eval_unary(&*expr, *op),
             ast::Expr::Call(call) => self.eval_call(&*call),
+            ast::Expr::List(list) => self.eval_list(&*list),
+            ast::Expr::Index(target, idx) => self.eval_index(&*target, &*idx),
             ast::Expr::If(if_expr) => self.eval_if(if_expr),
             ast::Expr::Block(block) => self.eval_block(block),
             ast::Expr::Node => self.eval_node(),
@@ -704,7 +741,37 @@ impl Context {
                     .unwrap();
                 Ok(Value::String(text.to_owned()))
             }
+            ("parent", [arg]) => {
+                let v = self.eval_expr(arg)?;
+                let id = v.as_node()?;
+                let node = self.get_node_by_id(id).unwrap();
+                let parent = node.parent();
+                parent
+                    .map(|n| Value::Node(n.id()))
+                    .ok_or(Error::NoParentNode(node))
+            }
             (s, _) => Err(Error::FailedLookup(s.to_owned())),
+        }
+    }
+
+    fn eval_list(&mut self, list: &ast::List) -> Result {
+        let mut vals = vec![];
+        for i in &list.items {
+            vals.push(self.eval_expr(i)?);
+        }
+        Ok(vals.into())
+    }
+
+    fn eval_index(&mut self, target: &ast::Expr, idx: &ast::Expr) -> Result {
+        let mut target = self.eval_expr(target)?.as_list()?;
+        let idx = self.eval_expr(idx)?.as_int()?;
+        if idx < 0 || idx >= target.len() as i128 {
+            Err(Error::ArrayOutOfBounds {
+                idx,
+                len: target.len()
+            })
+        } else {
+            Ok(target.remove(idx as usize))
         }
     }
 
@@ -983,6 +1050,37 @@ mod test {
                 ty: ast::Type::String,
                 name: "b".to_owned(),
                 value: "foo".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_list() {
+        let language = tree_sitter_python::language();
+        let mut ctx = Context::new(language)
+            .with_program(ast::Program::new())
+            .unwrap();
+        assert_eq!(
+            ctx.eval_block(&ast::Block {
+                body: vec![ast::Statement::Declaration(ast::Declaration {
+                    ty: ast::Type::List,
+                    name: "a".to_owned(),
+                    init: Some(
+                        ast::Expr::List(ast::List {
+                            items: vec![ast::Expr::int(5)]
+                        })
+                        .boxed()
+                    ),
+                }),]
+            }),
+            Ok(Value::Unit)
+        );
+        assert_eq!(
+            ctx.lookup(&String::from("a")).unwrap().clone(),
+            Variable {
+                ty: ast::Type::List,
+                name: "a".to_owned(),
+                value: vec![5.into()].into(),
             }
         );
     }

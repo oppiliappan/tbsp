@@ -59,14 +59,15 @@ pub enum Statement {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum Expr {
     Node,
-    FieldAccess(Box<Expr>, Identifier),
     Unit,
     Lit(Literal),
     Ident(Identifier),
-    // List(Vec<Expr>),
+    FieldAccess(Box<Expr>, Identifier),
+    Index(Box<Expr>, Box<Expr>),
     Bin(Box<Expr>, BinOp, Box<Expr>),
     Unary(Box<Expr>, UnaryOp),
     Call(Call),
+    List(List),
     If(IfExpr),
     Block(Block),
 }
@@ -154,6 +155,18 @@ impl From<Call> for Expr {
     }
 }
 
+/// A list construction expression
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct List {
+    pub items: Vec<Expr>,
+}
+
+impl From<List> for Expr {
+    fn from(list: List) -> Expr {
+        Expr::List(list)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Type {
     Unit,
@@ -161,6 +174,7 @@ pub enum Type {
     String,
     Boolean,
     Node,
+    List,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]

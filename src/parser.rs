@@ -169,20 +169,42 @@ fn parse_mul<'a>(i: &'a str) -> IResult<&'a str, Expr> {
     let div = parse_op("/", BinOp::Arith(ArithOp::Div));
     let mod_ = parse_op("%", BinOp::Arith(ArithOp::Mod));
     let op = alt((mul, div, mod_));
-    let recursive = parse_binary(parse_field_access, op, parse_mul);
-    let base = parse_field_access;
+    let recursive = parse_binary(parse_field_or_index, op, parse_mul);
+    let base = parse_field_or_index;
     alt((recursive, base)).parse(i)
 }
 
-fn parse_field_access<'a>(i: &'a str) -> IResult<&'a str, Expr> {
-    let trailing = map(tuple((ws(char('.')), ws(parse_ident))), |(_, i)| i);
+fn parse_field_or_index<'a>(i: &'a str) -> IResult<&'a str, Expr> {
+    enum FieldOrIndex {
+        Field(String),
+        Index(Expr),
+    }
+
     let (i, base) = parse_atom(i)?;
 
+    let field = map(tuple((ws(char('.')), ws(parse_ident))), |(_, i)| {
+        FieldOrIndex::Field(i)
+    });
+    let index = map(
+        tuple((ws(char('[')), parse_expr, ws(char(']')))),
+        |(_, idx, _)| FieldOrIndex::Index(idx),
+    );
+
     fold_many0(
-        trailing,
+        alt((field, index)),
         move || base.clone(),
-        move |acc, new| Expr::FieldAccess(acc.boxed(), new),
+        move |acc, new| match new {
+            FieldOrIndex::Field(f) => Expr::FieldAccess(acc.boxed(), f),
+            FieldOrIndex::Index(idx) => Expr::Index(acc.boxed(), idx.boxed()),
+        },
     )(i)
+}
+
+fn parse_list<'a>(i: &'a str) -> IResult<&'a str, List> {
+    let open = ws(char('['));
+    let items = separated_list0(char(','), parse_expr);
+    let close = ws(char(']'));
+    map(tuple((open, items, close)), |(_, items, _)| List { items }).parse(i)
 }
 
 fn parse_atom<'a>(i: &'a str) -> IResult<&'a str, Expr> {
@@ -191,6 +213,7 @@ fn parse_atom<'a>(i: &'a str) -> IResult<&'a str, Expr> {
         map(parse_block, Expr::Block),
         map(parse_if, Expr::If),
         map(parse_call, Expr::Call),
+        map(parse_list, Expr::List),
         map(parse_lit, Expr::Lit),
         map(parse_ident, Expr::Ident),
         map(parse_unit, |_| Expr::Unit),
@@ -254,7 +277,8 @@ fn parse_type<'a>(i: &'a str) -> IResult<&'a str, Type> {
     let int = value(Type::Integer, tag("int"));
     let string = value(Type::String, tag("string"));
     let bool_ = value(Type::Boolean, tag("bool"));
-    alt((int, string, bool_)).parse(i)
+    let list = value(Type::List, tag("list"));
+    alt((int, string, bool_, list)).parse(i)
 }
 
 fn parse_declaration<'a>(i: &'a str) -> IResult<&'a str, Declaration> {
@@ -510,6 +534,27 @@ mod test {
                 )
             ))
         );
+        assert_eq!(
+            parse_expr("a[0]"),
+            Ok((
+                "",
+                Expr::Index(Expr::Ident("a".to_owned()).boxed(), Expr::int(0).boxed())
+            ))
+        );
+        assert_eq!(
+            parse_expr("children(node)[0]"),
+            Ok((
+                "",
+                Expr::Index(
+                    Expr::Call(Call {
+                        function: "children".to_owned(),
+                        parameters: vec![Expr::Node]
+                    })
+                    .boxed(),
+                    Expr::int(0).boxed()
+                )
+            ))
+        );
     }
 
     #[test]
@@ -541,6 +586,22 @@ mod test {
                     ty: Type::Integer,
                     name: "a".to_owned(),
                     init: Some(Expr::int(5).boxed())
+                })
+            ))
+        );
+        assert_eq!(
+            parse_statement(r#"list a =["a", "b", "c"]; "#),
+            Ok((
+                "",
+                Statement::Declaration(Declaration {
+                    ty: Type::List,
+                    name: "a".to_owned(),
+                    init: Some(
+                        Expr::List(List {
+                            items: vec![Expr::str("a"), Expr::str("b"), Expr::str("c"),]
+                        })
+                        .boxed()
+                    )
                 })
             ))
         );
@@ -620,6 +681,49 @@ mod test {
                         body: vec![Statement::Bare(Expr::int(10)),]
                     }
                 })
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_index() {
+        assert_eq!(
+            parse_expr(
+                r#"
+                a[0]
+                "#
+            ),
+            Ok((
+                "",
+                Expr::Index(Expr::Ident("a".to_owned()).boxed(), Expr::int(0).boxed()),
+            ))
+        );
+        assert_eq!(
+            parse_expr(r#"node.children[idx]"#),
+            Ok((
+                "",
+                Expr::Index(
+                    Expr::FieldAccess(Expr::Node.boxed(), Identifier::from("children")).boxed(),
+                    Expr::Ident("idx".to_owned()).boxed()
+                )
+            ))
+        );
+        assert_eq!(
+            parse_expr(r#"foo[i].bar[j]"#),
+            Ok((
+                "",
+                Expr::Index(
+                    Expr::FieldAccess(
+                        Expr::Index(
+                            Expr::Ident("foo".to_owned()).boxed(),
+                            Expr::Ident("i".to_owned()).boxed()
+                        )
+                        .boxed(),
+                        "bar".to_owned()
+                    )
+                    .boxed(),
+                    Expr::Ident("j".to_owned()).boxed()
+                ),
             ))
         );
     }
