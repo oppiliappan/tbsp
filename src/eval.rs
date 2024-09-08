@@ -696,10 +696,10 @@ impl Context {
     }
 
     fn eval_call(&mut self, call: &ast::Call) -> Result {
-        (&*crate::builtins::BUILTINS)
-            .get(call.function.as_str())
-            .ok_or_else(|| Error::FailedLookup(call.function.to_owned()))?
-            .eval(self, call.parameters.as_slice())
+        ((&*crate::builtins::BUILTINS)
+         .get(call.function.as_str())
+         .ok_or_else(|| Error::FailedLookup(call.function.to_owned()))?)
+            (self, call.parameters.as_slice())
     }
 
     fn eval_list(&mut self, list: &ast::List) -> Result {
