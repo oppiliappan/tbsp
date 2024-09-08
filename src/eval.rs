@@ -93,7 +93,7 @@ impl Value {
         }
     }
 
-    fn as_str(&self) -> std::result::Result<&str, Error> {
+    pub(crate) fn as_str(&self) -> std::result::Result<&str, Error> {
         match self {
             Self::String(s) => Ok(s.as_str()),
             v => Err(Error::TypeMismatch {
@@ -103,7 +103,7 @@ impl Value {
         }
     }
 
-    fn as_int(&self) -> std::result::Result<i128, Error> {
+    pub(crate) fn as_int(&self) -> std::result::Result<i128, Error> {
         match self {
             Self::Integer(i) => Ok(*i),
             v => Err(Error::TypeMismatch {
@@ -113,7 +113,7 @@ impl Value {
         }
     }
 
-    fn as_node(&self) -> std::result::Result<NodeId, Error> {
+    pub(crate) fn as_node(&self) -> std::result::Result<NodeId, Error> {
         match self {
             Self::Node(id) => Ok(*id),
             v => Err(Error::TypeMismatch {
@@ -123,7 +123,7 @@ impl Value {
         }
     }
 
-    fn as_list(&self) -> std::result::Result<Vec<Value>, Error> {
+    pub(crate) fn as_list(&self) -> std::result::Result<Vec<Value>, Error> {
         match self {
             Self::List(values) => Ok(values.clone()),
             v => Err(Error::TypeMismatch {
@@ -137,6 +137,7 @@ impl Value {
         match (self, other) {
             (Self::Integer(s), Self::Integer(o)) => Ok(Self::Integer(*s + *o)),
             (Self::String(s), Self::String(o)) => Ok(Self::String(format!("{s}{o}"))),
+            (Self::List(l), o) => Ok(Self::List(l.iter().cloned().chain([o.clone()]).collect())),
             _ => Err(Error::UndefinedBinOp(
                 ast::BinOp::Arith(ast::ArithOp::Add),
                 self.ty(),
@@ -297,8 +298,13 @@ impl fmt::Display for Value {
             Self::Node(id) => write!(f, "<node #{id}>"),
             Self::List(items) => {
                 write!(f, "[")?;
-                for i in items {
-                    write!(f, "{i}")?;
+                let mut iterable = items.iter().peekable();
+                while let Some(item) = iterable.next() {
+                    if iterable.peek().is_none() {
+                        write!(f, "{item}")?;
+                    } else {
+                        write!(f, "{item}, ")?;
+                    }
                 }
                 write!(f, "]")
             }
@@ -315,6 +321,12 @@ impl From<bool> for Value {
 impl From<i128> for Value {
     fn from(value: i128) -> Self {
         Self::Integer(value)
+    }
+}
+
+impl From<usize> for Value {
+    fn from(value: usize) -> Self {
+        (value as i128).into()
     }
 }
 
@@ -402,6 +414,10 @@ pub enum Error {
     MalformedExpr(String),
     InvalidNodeKind(String),
     NoParentNode(tree_sitter::Node<'static>),
+    IncorrectArgFormat {
+        wanted: usize,
+        got: usize,
+    },
     InvalidStringSlice {
         length: usize,
         start: i128,
@@ -409,7 +425,7 @@ pub enum Error {
     },
     ArrayOutOfBounds {
         idx: i128,
-        len: usize
+        len: usize,
     },
     // current node is only set in visitors, not in BEGIN or END blocks
     CurrentNodeNotPresent,
@@ -421,7 +437,7 @@ pub struct Context {
     variables: HashMap<ast::Identifier, Variable>,
     language: tree_sitter::Language,
     visitors: Visitors,
-    input_src: Option<String>,
+    pub(crate) input_src: Option<String>,
     cursor: Option<tree_sitter::TreeCursor<'static>>,
     tree: Option<&'static tree_sitter::Tree>,
     cache: HashMap<NodeId, tree_sitter::Node<'static>>,
@@ -511,7 +527,7 @@ impl Context {
         self
     }
 
-    fn eval_expr(&mut self, expr: &ast::Expr) -> Result {
+    pub(crate) fn eval_expr(&mut self, expr: &ast::Expr) -> Result {
         match expr {
             ast::Expr::Unit => Ok(Value::Unit),
             ast::Expr::Lit(lit) => self.eval_lit(lit),
@@ -680,78 +696,10 @@ impl Context {
     }
 
     fn eval_call(&mut self, call: &ast::Call) -> Result {
-        match (call.function.as_str(), call.parameters.as_slice()) {
-            ("print", args) => {
-                for arg in args {
-                    let val = self.eval_expr(arg)?;
-                    print!("{val}");
-                }
-                Ok(Value::Unit)
-            }
-            (predicate @ ("isupper" | "islower"), [arg]) => Ok(self
-                .eval_expr(arg)?
-                .as_str()?
-                .chars()
-                .all(|c| match predicate {
-                    "isupper" => c.is_ascii_uppercase(),
-                    "islower" => c.is_ascii_lowercase(),
-                    _ => unreachable!(),
-                })
-                .into()),
-            ("substr", [string, indices @ ..]) => {
-                let v = self.eval_expr(string)?;
-                let s = v.as_str()?;
-                match indices {
-                    [start, end] => {
-                        let start = self.eval_expr(start)?.as_int()?;
-                        let end = self.eval_expr(end)?.as_int()?;
-                        if start < 0
-                            || start >= s.len() as i128
-                            || end >= s.len() as i128
-                            || start > end
-                        {
-                            return Err(Error::InvalidStringSlice {
-                                length: s.len(),
-                                start,
-                                end,
-                            });
-                        }
-                        Ok(s[start as usize..end as usize].into())
-                    }
-                    [end] => {
-                        let end = self.eval_expr(end)?.as_int()?;
-                        if end >= s.len() as i128 {
-                            return Err(Error::InvalidStringSlice {
-                                length: s.len(),
-                                start: 0,
-                                end,
-                            });
-                        }
-                        Ok(s[..end as usize].into())
-                    }
-                    _ => todo!(),
-                }
-            }
-            ("text", [arg]) => {
-                let v = self.eval_expr(arg)?;
-                let id = v.as_node()?;
-                let node = self.get_node_by_id(id).unwrap();
-                let text = node
-                    .utf8_text(self.input_src.as_ref().unwrap().as_bytes())
-                    .unwrap();
-                Ok(Value::String(text.to_owned()))
-            }
-            ("parent", [arg]) => {
-                let v = self.eval_expr(arg)?;
-                let id = v.as_node()?;
-                let node = self.get_node_by_id(id).unwrap();
-                let parent = node.parent();
-                parent
-                    .map(|n| Value::Node(n.id()))
-                    .ok_or(Error::NoParentNode(node))
-            }
-            (s, _) => Err(Error::FailedLookup(s.to_owned())),
-        }
+        (&*crate::builtins::BUILTINS)
+            .get(call.function.as_str())
+            .ok_or_else(|| Error::FailedLookup(call.function.to_owned()))?
+            .eval(self, call.parameters.as_slice())
     }
 
     fn eval_list(&mut self, list: &ast::List) -> Result {
@@ -768,7 +716,7 @@ impl Context {
         if idx < 0 || idx >= target.len() as i128 {
             Err(Error::ArrayOutOfBounds {
                 idx,
-                len: target.len()
+                len: target.len(),
             })
         } else {
             Ok(target.remove(idx as usize))
@@ -881,47 +829,29 @@ pub fn evaluate(file: &str, program: &str, language: tree_sitter::Language) -> R
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ast::*;
 
     #[test]
     fn bin() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language)
-            .with_program(ast::Program::new())
-            .unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
         assert_eq!(
-            ctx.eval_expr(&ast::Expr::Bin(
-                ast::Expr::int(5).boxed(),
-                ast::BinOp::Arith(ast::ArithOp::Add),
-                ast::Expr::int(10).boxed(),
-            )),
+            ctx.eval_expr(&Expr::bin(Expr::int(5), "+", Expr::int(10),)),
             Ok(Value::Integer(15))
         );
         assert_eq!(
-            ctx.eval_expr(&ast::Expr::Bin(
-                ast::Expr::int(5).boxed(),
-                ast::BinOp::Cmp(ast::CmpOp::Eq),
-                ast::Expr::int(10).boxed(),
-            )),
+            ctx.eval_expr(&Expr::bin(Expr::int(5), "==", Expr::int(10),)),
             Ok(Value::Boolean(false))
         );
         assert_eq!(
-            ctx.eval_expr(&ast::Expr::Bin(
-                ast::Expr::int(5).boxed(),
-                ast::BinOp::Cmp(ast::CmpOp::Lt),
-                ast::Expr::int(10).boxed(),
-            )),
+            ctx.eval_expr(&Expr::bin(Expr::int(5), "<", Expr::int(10),)),
             Ok(Value::Boolean(true))
         );
         assert_eq!(
-            ctx.eval_expr(&ast::Expr::Bin(
-                ast::Expr::Bin(
-                    ast::Expr::int(5).boxed(),
-                    ast::BinOp::Cmp(ast::CmpOp::Lt),
-                    ast::Expr::int(10).boxed(),
-                )
-                .boxed(),
-                ast::BinOp::Logic(ast::LogicOp::And),
-                ast::Expr::false_().boxed()
+            ctx.eval_expr(&Expr::bin(
+                Expr::bin(Expr::int(5), "<", Expr::int(10),),
+                "&&",
+                Expr::false_(),
             )),
             Ok(Value::Boolean(false))
         );
@@ -930,24 +860,16 @@ mod test {
     #[test]
     fn test_evaluate_blocks() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language)
-            .with_program(ast::Program::new())
-            .unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
         assert_eq!(
-            ctx.eval_block(&ast::Block {
+            ctx.eval_block(&Block {
                 body: vec![
-                    ast::Statement::Declaration(ast::Declaration {
-                        ty: ast::Type::Integer,
+                    Statement::Declaration(Declaration {
+                        ty: Type::Integer,
                         name: "a".to_owned(),
                         init: None,
                     }),
-                    ast::Statement::Bare(ast::Expr::Bin(
-                        ast::Expr::Ident("a".to_owned()).boxed(),
-                        ast::BinOp::Assign(ast::AssignOp {
-                            op: Some(ast::ArithOp::Add)
-                        }),
-                        ast::Expr::int(5).boxed()
-                    )),
+                    Statement::Bare(Expr::bin(Expr::ident("a"), "+=", Expr::int(5),)),
                 ]
             }),
             Ok(Value::Unit)
@@ -955,7 +877,7 @@ mod test {
         assert_eq!(
             ctx.lookup(&String::from("a")).unwrap().clone(),
             Variable {
-                ty: ast::Type::Integer,
+                ty: Type::Integer,
                 name: "a".to_owned(),
                 value: Value::Integer(5)
             }
@@ -965,35 +887,29 @@ mod test {
     #[test]
     fn test_evaluate_if() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language)
-            .with_program(ast::Program::new())
-            .unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
         assert_eq!(
-            ctx.eval_block(&ast::Block {
+            ctx.eval_block(&Block {
                 body: vec![
-                    ast::Statement::Declaration(ast::Declaration {
-                        ty: ast::Type::Integer,
+                    Statement::Declaration(Declaration {
+                        ty: Type::Integer,
                         name: "a".to_owned(),
-                        init: Some(ast::Expr::int(1).boxed()),
+                        init: Some(Expr::int(1).boxed()),
                     }),
-                    ast::Statement::Bare(ast::Expr::If(ast::IfExpr {
-                        condition: ast::Expr::true_().boxed(),
-                        then: ast::Block {
-                            body: vec![ast::Statement::Bare(ast::Expr::Bin(
-                                ast::Expr::Ident("a".to_owned()).boxed(),
-                                ast::BinOp::Assign(ast::AssignOp {
-                                    op: Some(ast::ArithOp::Add)
-                                }),
-                                ast::Expr::int(5).boxed()
+                    Statement::Bare(Expr::If(IfExpr {
+                        condition: Expr::true_().boxed(),
+                        then: Block {
+                            body: vec![Statement::Bare(Expr::bin(
+                                Expr::Ident("a".to_owned()),
+                                "+=",
+                                Expr::int(5),
                             ))]
                         },
-                        else_: ast::Block {
-                            body: vec![ast::Statement::Bare(ast::Expr::Bin(
-                                ast::Expr::Ident("a".to_owned()).boxed(),
-                                ast::BinOp::Assign(ast::AssignOp {
-                                    op: Some(ast::ArithOp::Add)
-                                }),
-                                ast::Expr::int(10).boxed()
+                        else_: Block {
+                            body: vec![Statement::Bare(Expr::bin(
+                                Expr::ident("a"),
+                                "+=",
+                                Expr::int(10),
                             ))]
                         }
                     }))
@@ -1004,7 +920,7 @@ mod test {
         assert_eq!(
             ctx.lookup(&String::from("a")).unwrap().clone(),
             Variable {
-                ty: ast::Type::Integer,
+                ty: Type::Integer,
                 name: "a".to_owned(),
                 value: Value::Integer(6)
             }
@@ -1014,29 +930,23 @@ mod test {
     #[test]
     fn test_substring() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language)
-            .with_program(ast::Program::new())
-            .unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
         assert_eq!(
-            ctx.eval_block(&ast::Block {
+            ctx.eval_block(&Block {
                 body: vec![
-                    ast::Statement::Declaration(ast::Declaration {
-                        ty: ast::Type::String,
+                    Statement::Declaration(Declaration {
+                        ty: Type::String,
                         name: "a".to_owned(),
-                        init: Some(ast::Expr::str("foobar").boxed()),
+                        init: Some(Expr::str("foobar").boxed()),
                     }),
-                    ast::Statement::Declaration(ast::Declaration {
-                        ty: ast::Type::String,
+                    Statement::Declaration(Declaration {
+                        ty: Type::String,
                         name: "b".to_owned(),
                         init: Some(
-                            ast::Expr::Call(ast::Call {
-                                function: "substr".into(),
-                                parameters: vec![
-                                    ast::Expr::Ident("a".to_owned()),
-                                    ast::Expr::int(0),
-                                    ast::Expr::int(3),
-                                ]
-                            })
+                            Expr::call(
+                                "substr",
+                                [Expr::Ident("a".to_owned()), Expr::int(0), Expr::int(3),]
+                            )
                             .boxed()
                         ),
                     }),
@@ -1047,7 +957,7 @@ mod test {
         assert_eq!(
             ctx.lookup(&String::from("b")).unwrap().clone(),
             Variable {
-                ty: ast::Type::String,
+                ty: Type::String,
                 name: "b".to_owned(),
                 value: "foo".into()
             }
@@ -1057,17 +967,15 @@ mod test {
     #[test]
     fn test_list() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language)
-            .with_program(ast::Program::new())
-            .unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
         assert_eq!(
-            ctx.eval_block(&ast::Block {
-                body: vec![ast::Statement::Declaration(ast::Declaration {
-                    ty: ast::Type::List,
+            ctx.eval_block(&Block {
+                body: vec![Statement::Declaration(Declaration {
+                    ty: Type::List,
                     name: "a".to_owned(),
                     init: Some(
-                        ast::Expr::List(ast::List {
-                            items: vec![ast::Expr::int(5)]
+                        Expr::List(List {
+                            items: vec![Expr::int(5)]
                         })
                         .boxed()
                     ),
@@ -1078,9 +986,33 @@ mod test {
         assert_eq!(
             ctx.lookup(&String::from("a")).unwrap().clone(),
             Variable {
-                ty: ast::Type::List,
+                ty: Type::List,
                 name: "a".to_owned(),
-                value: vec![5.into()].into(),
+                value: vec![5usize.into()].into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_ts_builtins() {
+        let language = tree_sitter_python::language();
+        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
+        assert_eq!(
+            ctx.eval_block(&Block {
+                body: vec![Statement::decl(
+                    Type::List,
+                    "a",
+                    Expr::list([Expr::int(5)]),
+                )]
+            }),
+            Ok(Value::Unit)
+        );
+        assert_eq!(
+            ctx.lookup(&String::from("a")).unwrap().clone(),
+            Variable {
+                ty: Type::List,
+                name: "a".to_owned(),
+                value: vec![5usize.into()].into(),
             }
         );
     }

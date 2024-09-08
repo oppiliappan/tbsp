@@ -56,6 +56,17 @@ pub enum Statement {
     Declaration(Declaration),
 }
 
+impl Statement {
+    #[cfg(test)]
+    pub fn decl(ty: Type, ident: &str, init: Expr) -> Self {
+        Self::Declaration(Declaration {
+            ty,
+            name: ident.to_owned(),
+            init: Some(init.boxed()),
+        })
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum Expr {
     Node,
@@ -77,11 +88,30 @@ impl Expr {
         Box::new(self)
     }
 
-    pub fn as_ident(self) -> Option<Identifier> {
-        match self {
-            Self::Ident(i) => Some(i),
-            _ => None,
-        }
+    #[cfg(test)]
+    pub fn bin(lhs: Expr, op: &str, rhs: Expr) -> Expr {
+        use std::str::FromStr;
+        Self::Bin(lhs.boxed(), BinOp::from_str(op).unwrap(), rhs.boxed())
+    }
+
+    #[cfg(test)]
+    pub fn ident(i: &str) -> Expr {
+        Self::Ident(i.to_owned())
+    }
+
+    #[cfg(test)]
+    pub fn call<const N: usize>(fun: &str, params: [Expr; N]) -> Expr {
+        Self::Call(Call {
+            function: fun.to_owned(),
+            parameters: params.to_vec(),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn list<const N: usize>(items: [Expr; N]) -> Expr {
+        Self::List(List {
+            items: items.to_vec()
+        })
     }
 }
 
@@ -97,6 +127,44 @@ pub enum BinOp {
     Logic(LogicOp),
     // =
     Assign(AssignOp),
+}
+
+impl std::str::FromStr for BinOp {
+    type Err = ();
+    fn from_str(val: &str) -> Result<Self, Self::Err> {
+        match val {
+            "+" => Ok(Self::Arith(ArithOp::Add)),
+            "-" => Ok(Self::Arith(ArithOp::Sub)),
+            "*" => Ok(Self::Arith(ArithOp::Mul)),
+            "/" => Ok(Self::Arith(ArithOp::Div)),
+            "%" => Ok(Self::Arith(ArithOp::Mod)),
+            ">" => Ok(Self::Cmp(CmpOp::Gt)),
+            "<" => Ok(Self::Cmp(CmpOp::Lt)),
+            ">=" => Ok(Self::Cmp(CmpOp::Gte)),
+            "<=" => Ok(Self::Cmp(CmpOp::Lte)),
+            "==" => Ok(Self::Cmp(CmpOp::Eq)),
+            "!=" => Ok(Self::Cmp(CmpOp::Neq)),
+            "&&" => Ok(Self::Logic(LogicOp::And)),
+            "||" => Ok(Self::Logic(LogicOp::Or)),
+            "=" => Ok(Self::Assign(AssignOp { op: None })),
+            "+=" => Ok(Self::Assign(AssignOp {
+                op: Some(ArithOp::Add),
+            })),
+            "-=" => Ok(Self::Assign(AssignOp {
+                op: Some(ArithOp::Sub),
+            })),
+            "*=" => Ok(Self::Assign(AssignOp {
+                op: Some(ArithOp::Mul),
+            })),
+            "/=" => Ok(Self::Assign(AssignOp {
+                op: Some(ArithOp::Div),
+            })),
+            "%=" => Ok(Self::Assign(AssignOp {
+                op: Some(ArithOp::Mod),
+            })),
+            _ => Err(()),
+        }
+    }
 }
 
 // + - * /

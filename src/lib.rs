@@ -1,6 +1,7 @@
 mod ast;
+mod builtins;
 mod eval;
-pub mod parser;
+mod parser;
 mod string;
 
 pub use eval::evaluate;
