@@ -39,6 +39,8 @@ builtins! {
     // list
     length,
     member,
+    push,
+    pop,
 }
 
 fn print(ctx: &mut Context, args: &[ast::Expr]) -> Result {
@@ -150,6 +152,48 @@ fn member(ctx: &mut Context, args: &[ast::Expr]) -> Result {
         .any(|item| item == &element)
         .wrap(Value::Boolean)
         .wrap(Ok)
+}
+
+fn push(ctx: &mut Context, args: &[ast::Expr]) -> Result {
+    let [lhs, rhs] = get_args::<2>(args)?;
+    let ast::Expr::Ident(ident) = lhs else {
+        return Err(Error::MalformedExpr(format!(
+            "malformed assigment, lhs: {:?}",
+            lhs
+        )));
+    };
+    let element = ctx.eval_expr(&rhs)?;
+    let variable = ctx.lookup_mut(ident)?;
+    variable.mutate(|v| match &mut v.value {
+        Value::List(l) => {
+            l.push(element);
+            Ok(Value::Unit)
+        }
+        _ => Err(Error::TypeMismatch {
+            expected: ast::Type::List,
+            got: v.ty().clone(),
+        }),
+    })
+}
+
+fn pop(ctx: &mut Context, args: &[ast::Expr]) -> Result {
+    let [lhs] = get_args::<1>(args)?;
+    let ast::Expr::Ident(ident) = lhs else {
+        return Err(Error::MalformedExpr(format!(
+            "malformed assigment, lhs: {:?}",
+            lhs
+        )));
+    };
+    let variable = ctx.lookup_mut(ident)?;
+    variable.mutate(|v| match &mut v.value {
+        Value::List(l) => l
+            .pop()
+            .ok_or_else(|| Error::ArrayOutOfBounds { idx: 0, len: 0 }),
+        _ => Err(Error::TypeMismatch {
+            expected: ast::Type::List,
+            got: v.ty().clone(),
+        }),
+    })
 }
 
 fn get_args<const N: usize>(args: &[ast::Expr]) -> std::result::Result<&[ast::Expr; N], Error> {

@@ -15,7 +15,7 @@ impl Variable {
         &self.value
     }
 
-    fn ty(&self) -> &ast::Type {
+    pub(crate) fn ty(&self) -> &ast::Type {
         &self.ty
     }
 
@@ -29,6 +29,10 @@ impl Variable {
                 got: value.ty(),
             })
         }
+    }
+
+    pub(crate) fn mutate(&mut self, f: impl FnOnce(&mut Self) -> Result) -> Result {
+        f(self)
     }
 }
 
@@ -45,7 +49,7 @@ pub enum Value {
 type NodeId = usize;
 
 impl Value {
-    fn ty(&self) -> ast::Type {
+    pub(crate) fn ty(&self) -> ast::Type {
         match self {
             Self::Unit => ast::Type::Unit,
             Self::Integer(_) => ast::Type::Integer,
@@ -562,13 +566,13 @@ impl Context {
             .wrap_ok()
     }
 
-    fn lookup(&mut self, ident: &ast::Identifier) -> std::result::Result<&Variable, Error> {
+    pub(crate) fn lookup(&mut self, ident: &ast::Identifier) -> std::result::Result<&Variable, Error> {
         self.variables
             .get(ident)
             .ok_or_else(|| Error::FailedLookup(ident.to_owned()))
     }
 
-    fn lookup_mut(&mut self, ident: &ast::Identifier) -> std::result::Result<&mut Variable, Error> {
+    pub(crate) fn lookup_mut(&mut self, ident: &ast::Identifier) -> std::result::Result<&mut Variable, Error> {
         self.variables
             .get_mut(ident)
             .ok_or_else(|| Error::FailedLookup(ident.to_owned()))
