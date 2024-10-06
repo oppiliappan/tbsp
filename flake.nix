@@ -66,7 +66,7 @@
           pkgs.cargo
 
           pkgs.rust-bin.nightly.latest.default
-          pkgs.rust-bin.nightly.latest.rust-analyzer
+          pkgs.rust-analyzer
 
           pkgs.mermaid-cli
         ];

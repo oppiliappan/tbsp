@@ -188,11 +188,11 @@ roadmap:
   - [ ] bytecode VM?
   - [ ] look into embedding high perf VMs, lua etc.
 - pattern matching
-  - [ ] allow matching on tree-sitter queries
+  - [x] allow matching on tree-sitter queries
   - [ ] support captures
 - language features
   - [ ] arrays and loops
-  - [ ] access node children
+  - [x] access node children
   - [x] access node fields
   - [ ] repr for ranges
   - [ ] comments

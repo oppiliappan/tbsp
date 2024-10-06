@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Program {
     pub stanzas: Vec<Stanza>,
 }
@@ -17,6 +17,30 @@ impl Program {
         self.stanzas = stanzas;
         Ok(self)
     }
+
+    pub fn begin(&self) -> Option<&Block> {
+        self.stanzas
+            .iter()
+            .find(|stanza| stanza.pattern == Pattern::Begin)
+            .map(|s| &s.statements)
+    }
+
+    pub fn end(&self) -> Option<&Block> {
+        self.stanzas
+            .iter()
+            .find(|stanza| stanza.pattern == Pattern::End)
+            .map(|s| &s.statements)
+    }
+
+    pub fn stanza_by_node(&self, node: tree_sitter::Node, state: Modifier) -> Option<&Block> {
+        self.stanzas
+            .iter()
+            .find(|stanza| {
+                stanza.pattern.matches(node)
+                    && matches!(stanza.pattern, Pattern::Tree { modifier, .. } if modifier == state)
+            })
+            .map(|s| &s.statements)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,13 +53,19 @@ pub struct Stanza {
 pub enum Pattern {
     Begin,
     End,
-    Node(NodePattern),
+    Tree {
+        modifier: Modifier,
+        matcher: TreePattern,
+    },
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct NodePattern {
-    pub modifier: Modifier,
-    pub kind: String,
+impl Pattern {
+    pub fn matches(&self, node: tree_sitter::Node) -> bool {
+        match self {
+            Self::Begin | Self::End => false,
+            Self::Tree { matcher, .. } => matcher.matches(node),
+        }
+    }
 }
 
 #[derive(Default, Debug, Eq, PartialEq, Clone, Copy)]
@@ -43,6 +73,32 @@ pub enum Modifier {
     #[default]
     Enter,
     Leave,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum TreePattern {
+    Atom(String),
+    List(Vec<TreePattern>),
+}
+
+impl TreePattern {
+    pub fn matches(&self, node: tree_sitter::Node) -> bool {
+        match self {
+            Self::Atom(kind) => node.kind() == kind,
+            Self::List(l) => match l.as_slice() {
+                &[] => panic!(),
+                [kind] => kind.matches(node),
+                [root, rest @ ..] => {
+                    let root_match = root.matches(node);
+                    let child_match = rest
+                        .iter()
+                        .zip(node.named_children(&mut node.walk()))
+                        .all(|(pat, child)| pat.matches(child));
+                    root_match && child_match
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default, Eq, PartialEq, Clone)]
@@ -110,7 +166,7 @@ impl Expr {
     #[cfg(test)]
     pub fn list<const N: usize>(items: [Expr; N]) -> Expr {
         Self::List(List {
-            items: items.to_vec()
+            items: items.to_vec(),
         })
     }
 }

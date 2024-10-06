@@ -346,65 +346,6 @@ impl From<Vec<Value>> for Value {
     }
 }
 
-type NodeKind = u16;
-
-#[derive(Debug, Default)]
-struct Visitor {
-    enter: ast::Block,
-    leave: ast::Block,
-}
-
-#[derive(Debug)]
-struct Visitors {
-    visitors: HashMap<NodeKind, Visitor>,
-    begin: ast::Block,
-    end: ast::Block,
-}
-
-impl Default for Visitors {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Visitors {
-    pub fn new() -> Self {
-        Self {
-            visitors: HashMap::new(),
-            begin: ast::Block { body: vec![] },
-            end: ast::Block { body: vec![] },
-        }
-    }
-
-    pub fn insert(
-        &mut self,
-        stanza: ast::Stanza,
-        language: &tree_sitter::Language,
-    ) -> std::result::Result<(), Error> {
-        match &stanza.pattern {
-            ast::Pattern::Begin => self.begin = stanza.statements,
-            ast::Pattern::End => self.end = stanza.statements,
-            ast::Pattern::Node(ast::NodePattern { modifier, kind }) => {
-                let id = language.id_for_node_kind(&kind, true);
-                if id == 0 {
-                    return Err(Error::InvalidNodeKind(kind.to_owned()));
-                }
-                let v = self.visitors.entry(id).or_default();
-                match modifier {
-                    ast::Modifier::Enter => v.enter = stanza.statements.clone(),
-                    ast::Modifier::Leave => v.leave = stanza.statements.clone(),
-                };
-            }
-        }
-        Ok(())
-    }
-
-    pub fn get_by_node(&self, node: tree_sitter::Node) -> Option<&Visitor> {
-        let node_id = node.kind_id();
-        self.visitors.get(&node_id)
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     FailedLookup(ast::Identifier),
@@ -440,7 +381,7 @@ pub type Result = std::result::Result<Value, Error>;
 pub struct Context {
     variables: HashMap<ast::Identifier, Variable>,
     language: tree_sitter::Language,
-    visitors: Visitors,
+    program: ast::Program,
     pub(crate) input_src: Option<String>,
     cursor: Option<tree_sitter::TreeCursor<'static>>,
     tree: Option<&'static tree_sitter::Tree>,
@@ -452,7 +393,6 @@ impl fmt::Debug for Context {
         f.debug_struct("Context")
             .field("variables", &self.variables)
             .field("language", &self.language)
-            .field("visitors", &self.visitors)
             .field("input_src", &self.input_src)
             .field(
                 "cursor",
@@ -469,7 +409,7 @@ impl fmt::Debug for Context {
 impl Context {
     pub fn new(language: tree_sitter::Language) -> Self {
         Self {
-            visitors: Default::default(),
+            program: Default::default(),
             variables: Default::default(),
             language,
             input_src: None,
@@ -512,11 +452,9 @@ impl Context {
         None
     }
 
-    pub fn with_program(mut self, program: ast::Program) -> std::result::Result<Self, Error> {
-        for stanza in program.stanzas.into_iter() {
-            self.visitors.insert(stanza, &self.language)?;
-        }
-        Ok(self)
+    pub fn with_program(mut self, program: ast::Program) -> Self {
+        self.program = program;
+        self
     }
 
     pub fn with_input(mut self, src: String) -> Self {
@@ -566,13 +504,19 @@ impl Context {
             .wrap_ok()
     }
 
-    pub(crate) fn lookup(&mut self, ident: &ast::Identifier) -> std::result::Result<&Variable, Error> {
+    pub(crate) fn lookup(
+        &mut self,
+        ident: &ast::Identifier,
+    ) -> std::result::Result<&Variable, Error> {
         self.variables
             .get(ident)
             .ok_or_else(|| Error::FailedLookup(ident.to_owned()))
     }
 
-    pub(crate) fn lookup_mut(&mut self, ident: &ast::Identifier) -> std::result::Result<&mut Variable, Error> {
+    pub(crate) fn lookup_mut(
+        &mut self,
+        ident: &ast::Identifier,
+    ) -> std::result::Result<&mut Variable, Error> {
         self.variables
             .get_mut(ident)
             .ok_or_else(|| Error::FailedLookup(ident.to_owned()))
@@ -701,9 +645,11 @@ impl Context {
 
     fn eval_call(&mut self, call: &ast::Call) -> Result {
         ((&*crate::builtins::BUILTINS)
-         .get(call.function.as_str())
-         .ok_or_else(|| Error::FailedLookup(call.function.to_owned()))?)
-            (self, call.parameters.as_slice())
+            .get(call.function.as_str())
+            .ok_or_else(|| Error::FailedLookup(call.function.to_owned()))?)(
+            self,
+            call.parameters.as_slice(),
+        )
     }
 
     fn eval_list(&mut self, list: &ast::List) -> Result {
@@ -774,42 +720,50 @@ impl Context {
     }
 
     pub fn eval(&mut self) -> Result {
-        let visitors = std::mem::take(&mut self.visitors);
+        let program = std::mem::take(&mut self.program);
         let mut has_next = true;
         let mut postorder = Vec::new();
 
         // BEGIN block
-        self.eval_block(&visitors.begin)?;
+        if let Some(block) = program.begin() {
+            self.eval_block(block)?;
+        }
 
         while has_next {
             let current_node = self.cursor.as_ref().unwrap().node();
             postorder.push(current_node);
 
-            let visitor = visitors.get_by_node(current_node);
-
-            if let Some(v) = visitor {
-                self.eval_block(&v.enter)?;
+            if let Some(block) = program.stanza_by_node(current_node, ast::Modifier::Enter) {
+                self.eval_block(block)?;
             }
 
             has_next = self.goto_first_child();
 
             if !has_next {
                 has_next = self.cursor.as_mut().unwrap().goto_next_sibling();
-                if let Some(v) = postorder.pop().and_then(|n| visitors.get_by_node(n)) {
-                    self.eval_block(&v.leave)?;
-                }
+                if let Some(block) = postorder
+                    .pop()
+                    .and_then(|n| program.stanza_by_node(n, ast::Modifier::Leave))
+                {
+                    self.eval_block(block)?;
+                };
             }
 
             while !has_next && self.cursor.as_mut().unwrap().goto_parent() {
                 has_next = self.cursor.as_mut().unwrap().goto_next_sibling();
-                if let Some(v) = postorder.pop().and_then(|n| visitors.get_by_node(n)) {
-                    self.eval_block(&v.leave)?;
-                }
+                if let Some(block) = postorder
+                    .pop()
+                    .and_then(|n| program.stanza_by_node(n, ast::Modifier::Leave))
+                {
+                    self.eval_block(block)?;
+                };
             }
         }
 
         // END block
-        self.eval_block(&visitors.end)?;
+        if let Some(block) = program.end() {
+            self.eval_block(block)?;
+        }
 
         Ok(Value::Unit)
     }
@@ -825,7 +779,7 @@ pub fn evaluate(file: &str, program: &str, language: tree_sitter::Language) -> R
     let mut ctx = Context::new(language)
         .with_input(file.to_owned())
         .with_tree(tree)
-        .with_program(program)?;
+        .with_program(program);
 
     ctx.eval()
 }
@@ -838,7 +792,7 @@ mod test {
     #[test]
     fn bin() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new());
         assert_eq!(
             ctx.eval_expr(&Expr::bin(Expr::int(5), "+", Expr::int(10),)),
             Ok(Value::Integer(15))
@@ -864,7 +818,7 @@ mod test {
     #[test]
     fn test_evaluate_blocks() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new());
         assert_eq!(
             ctx.eval_block(&Block {
                 body: vec![
@@ -891,7 +845,7 @@ mod test {
     #[test]
     fn test_evaluate_if() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new());
         assert_eq!(
             ctx.eval_block(&Block {
                 body: vec![
@@ -934,7 +888,7 @@ mod test {
     #[test]
     fn test_substring() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new());
         assert_eq!(
             ctx.eval_block(&Block {
                 body: vec![
@@ -971,7 +925,7 @@ mod test {
     #[test]
     fn test_list() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new());
         assert_eq!(
             ctx.eval_block(&Block {
                 body: vec![Statement::Declaration(Declaration {
@@ -1000,14 +954,10 @@ mod test {
     #[test]
     fn test_ts_builtins() {
         let language = tree_sitter_python::language();
-        let mut ctx = Context::new(language).with_program(Program::new()).unwrap();
+        let mut ctx = Context::new(language).with_program(Program::new());
         assert_eq!(
             ctx.eval_block(&Block {
-                body: vec![Statement::decl(
-                    Type::List,
-                    "a",
-                    Expr::list([Expr::int(5)]),
-                )]
+                body: vec![Statement::decl(Type::List, "a", Expr::list([Expr::int(5)]),)]
             }),
             Ok(Value::Unit)
         );
